@@ -3,6 +3,7 @@
         <Uptime :stack="stack" :fixed-width="true" class="me-2" />
         <div class="title">
             <span>{{ stackName }}</span>
+            <span v-if="!stack.isManagedByDockge" class="badge bg-secondary ms-2 external-badge">External</span>
             <div v-if="$root.agentCount > 1" class="endpoint">{{ endpointDisplay }}</div>
         </div>
     </router-link>
@@ -150,6 +151,12 @@ export default {
     .title {
         margin-top: -4px;
     }
+
+    .external-badge {
+        font-size: 10px;
+        vertical-align: middle;
+    }
+
     .endpoint {
         font-size: 12px;
         color: $dark-font-color3;

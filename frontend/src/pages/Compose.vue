@@ -4,6 +4,7 @@
             <h1 v-if="isAdd" class="mb-3">{{ $t("compose") }}</h1>
             <h1 v-else class="mb-3">
                 <Uptime :stack="globalStack" :pill="true" /> {{ stack.name }}
+                <span v-if="!stack.isManagedByDockge" class="badge bg-secondary ms-2">External</span>
                 <span v-if="$root.agentCount > 1" class="agent-name">
                     ({{ endpointDisplay }})
                 </span>
@@ -59,6 +60,30 @@
                     <font-awesome-icon icon="trash" class="me-1" />
                     {{ $t("deleteStack") }}
                 </button>
+            </div>
+
+            <div v-else-if="!isAdd" class="mb-3">
+                <div class="btn-group" role="group">
+                    <button v-if="!active" class="btn btn-primary" :disabled="processing" @click="startStack">
+                        <font-awesome-icon icon="play" class="me-1" />
+                        {{ $t("startStack") }}
+                    </button>
+
+                    <button v-if="active" class="btn btn-normal" :disabled="processing" @click="restartStack">
+                        <font-awesome-icon icon="rotate" class="me-1" />
+                        {{ $t("restartStack") }}
+                    </button>
+
+                    <button v-if="active" class="btn btn-normal" :disabled="processing" @click="stopStack">
+                        <font-awesome-icon icon="stop" class="me-1" />
+                        {{ $t("stopStack") }}
+                    </button>
+
+                    <button class="btn btn-danger" :disabled="processing" @click="showDeleteDialog = !showDeleteDialog">
+                        <font-awesome-icon icon="trash" class="me-1" />
+                        {{ $t("deleteStack") }}
+                    </button>
+                </div>
             </div>
 
             <!-- URLs -->
@@ -185,6 +210,23 @@
                         {{ yamlError }}
                     </div>
 
+                    <div v-if="compatErrors.length > 0 || compatWarnings.length > 0" class="compatibility-report mb-3">
+                        <div v-if="compatErrors.length > 0" class="alert alert-danger mb-2">
+                            <strong>⚠ Unsupported Features</strong>
+                            <ul class="mb-0 mt-1">
+                                <li v-for="err in compatErrors" :key="err.path">
+                                    <code>{{ err.path }}</code>: {{ err.message }}
+                                </li>
+                            </ul>
+                        </div>
+                        <div v-if="compatWarnings.length > 0" class="alert alert-warning mb-0">
+                            <strong>Warnings</strong>
+                            <ul class="mb-0 mt-1">
+                                <li v-for="(w, i) in compatWarnings" :key="i">{{ w }}</li>
+                            </ul>
+                        </div>
+                    </div>
+
                     <!-- ENV editor -->
                     <div v-if="isEditMode">
                         <h4 class="mb-3">.env</h4>
@@ -230,8 +272,8 @@
                 </div>
             </div>
 
-            <div v-if="!stack.isManagedByDockge && !processing">
-                {{ $t("stackNotManagedByDockgeMsg") }}
+            <div v-if="!stack.isManagedByDockge && !processing" class="text-muted mb-3">
+                This is an external container. Compose editing is disabled, but runtime actions are available.
             </div>
 
             <!-- Delete Dialog -->
@@ -276,6 +318,8 @@ services:
 const envDefault = "# VARIABLE=value #comment";
 
 let yamlErrorTimeout = null;
+
+let compatCheckTimeout = null;
 
 let serviceStatusTimeout = null;
 
@@ -338,6 +382,8 @@ export default {
             showDeleteDialog: false,
             newContainerName: "",
             stopServiceStatusTimeout: false,
+            compatErrors: [],
+            compatWarnings: [],
         };
     },
     computed: {
@@ -650,6 +696,13 @@ export default {
         },
 
         downStack() {
+            if (!confirm(`Delete container resources for '${this.stack.name}'?`)) {
+                return;
+            }
+            if (!confirm(`Final confirmation: delete container resources for '${this.stack.name}'?`)) {
+                return;
+            }
+
             this.processing = true;
 
             this.$root.emitAgent(this.endpoint, "downStack", this.stack.name, (res) => {
@@ -677,6 +730,10 @@ export default {
         },
 
         deleteDialog() {
+            if (!confirm(`Final confirmation: delete '${this.stack.name}'?`)) {
+                return;
+            }
+
             this.$root.emitAgent(this.endpoint, "deleteStack", this.stack.name, (res) => {
                 this.$root.toastRes(res);
                 if (res.ok) {
@@ -727,6 +784,11 @@ export default {
 
                 clearTimeout(yamlErrorTimeout);
                 this.yamlError = "";
+
+                clearTimeout(compatCheckTimeout);
+                compatCheckTimeout = setTimeout(() => {
+                    this.checkCompat();
+                }, 500);
             } catch (e) {
                 clearTimeout(yamlErrorTimeout);
 
@@ -747,6 +809,21 @@ export default {
 
         checkYAML() {
 
+        },
+
+        checkCompat() {
+            const yamlContent = this.stack.composeYAML;
+            if (!yamlContent || !yamlContent.trim()) {
+                this.compatErrors = [];
+                this.compatWarnings = [];
+                return;
+            }
+            this.$root.emitAgent(this.endpoint, "checkComposeCompat", yamlContent, (res) => {
+                if (res.ok) {
+                    this.compatErrors = res.errors || [];
+                    this.compatWarnings = res.warnings || [];
+                }
+            });
         },
 
         addContainer() {

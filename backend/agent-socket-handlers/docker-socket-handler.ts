@@ -1,11 +1,11 @@
 import { AgentSocketHandler } from "../agent-socket-handler";
-import { DockgeServer } from "../dockge-server";
-import { callbackError, callbackResult, checkLogin, DockgeSocket, ValidationError } from "../util-server";
+import { DockgeACServer } from "../dockge-server";
+import { callbackError, callbackResult, checkLogin, DockgeACSocket, ValidationError } from "../util-server";
 import { Stack } from "../stack";
 import { AgentSocket } from "../../common/agent-socket";
 
 export class DockerSocketHandler extends AgentSocketHandler {
-    create(socket : DockgeSocket, server : DockgeServer, agentSocket : AgentSocket) {
+    create(socket : DockgeACSocket, server : DockgeACServer, agentSocket : AgentSocket) {
         // Do not call super.create()
 
         agentSocket.on("deployStack", async (name : unknown, composeYAML : unknown, composeENV : unknown, isAdd : unknown, callback) => {
@@ -242,7 +242,8 @@ export class DockerSocketHandler extends AgentSocketHandler {
         agentSocket.on("getDockerNetworkList", async (callback) => {
             try {
                 checkLogin(socket);
-                const dockerNetworkList = await server.getDockerNetworkList();
+                const adapter = Stack.getAdapter(server);
+                const dockerNetworkList = await adapter.getNetworkList();
                 callbackResult({
                     ok: true,
                     dockerNetworkList,
@@ -251,9 +252,61 @@ export class DockerSocketHandler extends AgentSocketHandler {
                 callbackError(e, callback);
             }
         });
+
+        agentSocket.on("getContainerImageList", async (callback) => {
+            try {
+                checkLogin(socket);
+                const adapter = Stack.getAdapter(server);
+                const imageList = await adapter.getImageList();
+                callbackResult({
+                    ok: true,
+                    imageList,
+                }, callback);
+            } catch (e) {
+                callbackError(e, callback);
+            }
+        });
+
+        agentSocket.on("deleteContainerImage", async (reference: unknown, callback) => {
+            try {
+                checkLogin(socket);
+
+                if (typeof reference !== "string" || reference.trim().length === 0) {
+                    throw new ValidationError("Image reference must be a string");
+                }
+
+                const adapter = Stack.getAdapter(server);
+                await adapter.deleteImage(reference.trim());
+
+                callbackResult({
+                    ok: true,
+                    msg: "Image deleted",
+                }, callback);
+            } catch (e) {
+                callbackError(e, callback);
+            }
+        });
+
+        agentSocket.on("checkComposeCompat", async (composeYAML: unknown, callback) => {
+            try {
+                checkLogin(socket);
+                if (typeof composeYAML !== "string") {
+                    throw new ValidationError("composeYAML must be a string");
+                }
+                const { validate } = await import("../runtime/apple-container/compiler.js");
+                const result = validate(composeYAML);
+                callbackResult({
+                    ok: true,
+                    errors: result.errors,
+                    warnings: result.warnings,
+                }, callback);
+            } catch (e) {
+                callbackError(e, callback);
+            }
+        });
     }
 
-    async saveStack(server : DockgeServer, name : unknown, composeYAML : unknown, composeENV : unknown, isAdd : unknown) : Promise<Stack> {
+    async saveStack(server : DockgeACServer, name : unknown, composeYAML : unknown, composeENV : unknown, isAdd : unknown) : Promise<Stack> {
         // Check types
         if (typeof(name) !== "string") {
             throw new ValidationError("Name must be a string");
@@ -274,4 +327,3 @@ export class DockerSocketHandler extends AgentSocketHandler {
     }
 
 }
-

@@ -1,11 +1,14 @@
-# Should update .dockerignore as well
 .env
 node_modules
 .idea
+.DS_Store
 data
 stacks
 tmp
 /private
+.dockge-data
+.logs
+ops/launchd/com.dockge.ac.plist
 
 # Git only
 frontend-dist

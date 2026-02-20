@@ -1,24 +1,28 @@
-import { DockgeServer } from "./dockge-server";
+import { DockgeACServer } from "./dockge-server";
 import fs, { promises as fsAsync } from "fs";
 import { log } from "./log";
 import yaml from "yaml";
-import { DockgeSocket, fileExists, ValidationError } from "./util-server";
+import dotenv from "dotenv";
+import { DockgeACSocket, fileExists, ValidationError } from "./util-server";
 import path from "path";
 import {
     acceptedComposeFileNames,
     COMBINED_TERMINAL_COLS,
     COMBINED_TERMINAL_ROWS,
     CREATED_FILE,
-    CREATED_STACK,
-    EXITED, getCombinedTerminalName,
-    getComposeTerminalName, getContainerExecTerminalName,
-    PROGRESS_TERMINAL_ROWS,
+    envsubstYAML,
+    getCombinedTerminalName,
+    getContainerExecTerminalName,
     RUNNING, TERMINAL_ROWS,
     UNKNOWN
 } from "../common/util-common";
 import { InteractiveTerminal, Terminal } from "./terminal";
-import childProcessAsync from "promisify-child-process";
 import { Settings } from "./settings";
+import { AppleContainerAdapter } from "./runtime/apple-container/adapter.js";
+import { compile } from "./runtime/apple-container/compiler.js";
+import { StackLock } from "./runtime/apple-container/stack-lock.js";
+
+const CONTAINER_PREFIX = "dockgeac";
 
 export class Stack {
 
@@ -28,13 +32,30 @@ export class Stack {
     protected _composeENV?: string;
     protected _configFilePath?: string;
     protected _composeFileName: string = "compose.yaml";
-    protected server: DockgeServer;
+    protected server: DockgeACServer;
 
     protected combinedTerminal? : Terminal;
 
     protected static managedStackList: Map<string, Stack> = new Map();
 
-    constructor(server : DockgeServer, name : string, composeYAML? : string, composeENV? : string, skipFSOperations = false) {
+    private static adapter: AppleContainerAdapter | null = null;
+    private static stackLock: StackLock | null = null;
+
+    static getAdapter(server: DockgeACServer): AppleContainerAdapter {
+        if (!Stack.adapter) {
+            Stack.adapter = new AppleContainerAdapter(server.config.dataDir);
+        }
+        return Stack.adapter;
+    }
+
+    static getStackLock(server: DockgeACServer): StackLock {
+        if (!Stack.stackLock) {
+            Stack.stackLock = new StackLock(server.config.dataDir);
+        }
+        return Stack.stackLock;
+    }
+
+    constructor(server : DockgeACServer, name : string, composeYAML? : string, composeENV? : string, skipFSOperations = false) {
         this.name = name;
         this.server = server;
         this._composeYAML = composeYAML;
@@ -90,17 +111,16 @@ export class Stack {
     }
 
     /**
-     * Get the status of the stack from `docker compose ps --format json`
+     * Get the status of the stack via adapter
      */
     async ps() : Promise<object> {
-        let res = await childProcessAsync.spawn("docker", this.getComposeOptions("ps", "--format", "json"), {
-            cwd: this.path,
-            encoding: "utf-8",
-        });
-        if (!res.stdout) {
-            return {};
+        const adapter = Stack.getAdapter(this.server);
+        const statusMap = await adapter.getServiceStatusList(this.name);
+        const result: Record<string, object> = {};
+        for (const [ svc, status ] of statusMap) {
+            result[svc] = status;
         }
-        return JSON.parse(res.stdout.toString());
+        return result;
     }
 
     get isManagedByDockge() : boolean {
@@ -122,7 +142,6 @@ export class Stack {
 
         let lines = this.composeENV.split("\n");
 
-        // Check if the .env is able to pass docker-compose
         // Prevent "setenv: The parameter is incorrect"
         // It only happens when there is one line and it doesn't contain "="
         if (lines.length === 1 && !lines[0].includes("=") && lines[0].length > 0) {
@@ -206,29 +225,56 @@ export class Stack {
         }
     }
 
-    async deploy(socket : DockgeSocket) : Promise<number> {
-        const terminalName = getComposeTerminalName(socket.endpoint, this.name);
-        let exitCode = await Terminal.exec(this.server, socket, terminalName, "docker", this.getComposeOptions("up", "-d", "--remove-orphans"), this.path);
-        if (exitCode !== 0) {
-            throw new Error("Failed to deploy, please check the terminal output for more information.");
+    async deploy(socket : DockgeACSocket) : Promise<number> {
+        const adapter = Stack.getAdapter(this.server);
+        const lock = Stack.getStackLock(this.server);
+
+        const env = dotenv.parse(this.composeENV ?? "");
+        const renderedComposeYAML = envsubstYAML(this.composeYAML ?? "", env);
+
+        const { plan, errors, warnings } = compile(renderedComposeYAML, this.name);
+
+        if (errors.length > 0) {
+            const errorMsg = errors.map(e => `${e.path}: ${e.message}`).join("\n");
+            log.error("deploy", `Preflight failed for ${this.name}: ${errorMsg}`);
+            throw new Error(`Preflight failed:\n${errorMsg}`);
         }
-        return exitCode;
+
+        for (const w of warnings) {
+            log.warn("deploy", `${this.name}: ${w}`);
+        }
+
+        try {
+            await adapter.deploy(plan);
+            const lockData = lock.read(this.name);
+            if (lockData) {
+                lockData.fingerprint = lock.getFingerprint(this.composeYAML ?? "");
+                lock.write(this.name, lockData);
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            log.error("deploy", msg);
+            throw e;
+        }
+
+        return 0;
     }
 
-    async delete(socket: DockgeSocket) : Promise<number> {
-        const terminalName = getComposeTerminalName(socket.endpoint, this.name);
-        let exitCode = await Terminal.exec(this.server, socket, terminalName, "docker", this.getComposeOptions("down", "--remove-orphans"), this.path);
-        if (exitCode !== 0) {
-            throw new Error("Failed to delete, please check the terminal output for more information.");
+    async delete(socket: DockgeACSocket) : Promise<number> {
+        const adapter = Stack.getAdapter(this.server);
+
+        try {
+            await adapter.down(this.name);
+        } catch (e) {
+            log.warn("delete", `Failed to down stack ${this.name}: ${e}`);
         }
 
-        // Remove the stack folder
         await fsAsync.rm(this.path, {
             recursive: true,
             force: true
         });
 
-        return exitCode;
+        return 0;
     }
 
     async updateStatus() {
@@ -262,7 +308,7 @@ export class Stack {
         return false;
     }
 
-    static async getStackList(server : DockgeServer, useCacheForManaged = false) : Promise<Map<string, Stack>> {
+    static async getStackList(server : DockgeACServer, useCacheForManaged = false) : Promise<Map<string, Stack>> {
         let stacksDir = server.stacksDir;
         let stackList : Map<string, Stack>;
 
@@ -300,32 +346,23 @@ export class Stack {
             this.managedStackList = new Map(stackList);
         }
 
-        // Get status from docker compose ls
-        let res = await childProcessAsync.spawn("docker", [ "compose", "ls", "--all", "--format", "json" ], {
-            encoding: "utf-8",
-        });
-
-        if (!res.stdout) {
-            return stackList;
-        }
-
-        let composeList = JSON.parse(res.stdout.toString());
-
-        for (let composeStack of composeList) {
-            let stack = stackList.get(composeStack.Name);
-
-            // This stack probably is not managed by Dockge, but we still want to show it
-            if (!stack) {
-                // Skip the dockge stack if it is not managed by Dockge
-                if (composeStack.Name === "dockge") {
-                    continue;
+        // Get status from adapter
+        const adapter = Stack.getAdapter(server);
+        try {
+            const allStatus = await adapter.getAllStackStatus();
+            for (const [ stackName, status ] of allStatus) {
+                let stack = stackList.get(stackName);
+                if (!stack) {
+                    if (stackName === "dockge") {
+                        continue;
+                    }
+                    stack = new Stack(server, stackName);
+                    stackList.set(stackName, stack);
                 }
-                stack = new Stack(server, composeStack.Name);
-                stackList.set(composeStack.Name, stack);
+                stack._status = status;
             }
-
-            stack._status = this.statusConvert(composeStack.Status);
-            stack._configFilePath = composeStack.ConfigFiles;
+        } catch (e) {
+            log.warn("getStackList", `Failed to get adapter status: ${e}`);
         }
 
         return stackList;
@@ -333,53 +370,27 @@ export class Stack {
 
     /**
      * Get the status list, it will be used to update the status of the stacks
-     * Not all status will be returned, only the stack that is deployed or created to `docker compose` will be returned
+     * Not all status will be returned, only the stack that is deployed will be returned
      */
     static async getStatusList() : Promise<Map<string, number>> {
         let statusList = new Map<string, number>();
-
-        let res = await childProcessAsync.spawn("docker", [ "compose", "ls", "--all", "--format", "json" ], {
-            encoding: "utf-8",
-        });
-
-        if (!res.stdout) {
-            return statusList;
+        try {
+            const adapter = Stack.getAdapter(Stack.managedStackList.values().next().value?.server);
+            if (adapter) {
+                return await adapter.getAllStackStatus();
+            }
+        } catch (e) {
+            log.error("getStatusList", e);
         }
-
-        let composeList = JSON.parse(res.stdout.toString());
-
-        for (let composeStack of composeList) {
-            statusList.set(composeStack.Name, this.statusConvert(composeStack.Status));
-        }
-
         return statusList;
     }
 
-    /**
-     * Convert the status string from `docker compose ls` to the status number
-     * Input Example: "exited(1), running(1)"
-     * @param status
-     */
-    static statusConvert(status : string) : number {
-        if (status.startsWith("created")) {
-            return CREATED_STACK;
-        } else if (status.includes("exited")) {
-            // If one of the service is exited, we consider the stack is exited
-            return EXITED;
-        } else if (status.startsWith("running")) {
-            // If there is no exited services, there should be only running services
-            return RUNNING;
-        } else {
-            return UNKNOWN;
-        }
-    }
-
-    static async getStack(server: DockgeServer, stackName: string, skipFSOperations = false) : Promise<Stack> {
+    static async getStack(server: DockgeACServer, stackName: string, skipFSOperations = false) : Promise<Stack> {
         let dir = path.join(server.stacksDir, stackName);
 
         if (!skipFSOperations) {
             if (!await fileExists(dir) || !(await fsAsync.stat(dir)).isDirectory()) {
-                // Maybe it is a stack managed by docker compose directly
+                // Maybe it is a stack managed externally
                 let stackList = await this.getStackList(server, true);
                 let stack = stackList.get(stackName);
 
@@ -407,79 +418,84 @@ export class Stack {
         return stack;
     }
 
-    getComposeOptions(command : string, ...extraOptions : string[]) {
-        //--env-file ./../global.env --env-file .env
-        let options = [ "compose", command, ...extraOptions ];
-        if (fs.existsSync(path.join(this.server.stacksDir, "global.env"))) {
-            if (fs.existsSync(path.join(this.path, ".env"))) {
-                options.splice(1, 0, "--env-file", "./.env");
+    async start(socket: DockgeACSocket) {
+        const adapter = Stack.getAdapter(this.server);
+        const lock = Stack.getStackLock(this.server);
+
+        if (this.isManagedByDockge && !lock.read(this.name)) {
+            return await this.deploy(socket);
+        }
+
+        try {
+            await adapter.start(this.name);
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+
+            if (this.isManagedByDockge && /not found/i.test(msg)) {
+                return await this.deploy(socket);
             }
-            options.splice(1, 0, "--env-file", "../global.env");
+
+            throw e;
         }
-        console.log(options);
-        return options;
+
+        return 0;
     }
 
-    async start(socket: DockgeSocket) {
-        const terminalName = getComposeTerminalName(socket.endpoint, this.name);
-        let exitCode = await Terminal.exec(this.server, socket, terminalName, "docker", this.getComposeOptions("up", "-d", "--remove-orphans"), this.path);
-        if (exitCode !== 0) {
-            throw new Error("Failed to start, please check the terminal output for more information.");
-        }
-        return exitCode;
+    async stop(socket: DockgeACSocket) : Promise<number> {
+        const adapter = Stack.getAdapter(this.server);
+        await adapter.stop(this.name);
+        return 0;
     }
 
-    async stop(socket: DockgeSocket) : Promise<number> {
-        const terminalName = getComposeTerminalName(socket.endpoint, this.name);
-        let exitCode = await Terminal.exec(this.server, socket, terminalName, "docker", this.getComposeOptions("stop"), this.path);
-        if (exitCode !== 0) {
-            throw new Error("Failed to stop, please check the terminal output for more information.");
-        }
-        return exitCode;
+    async restart(socket: DockgeACSocket) : Promise<number> {
+        const adapter = Stack.getAdapter(this.server);
+        await adapter.restart(this.name);
+        return 0;
     }
 
-    async restart(socket: DockgeSocket) : Promise<number> {
-        const terminalName = getComposeTerminalName(socket.endpoint, this.name);
-        let exitCode = await Terminal.exec(this.server, socket, terminalName, "docker", this.getComposeOptions("restart"), this.path);
-        if (exitCode !== 0) {
-            throw new Error("Failed to restart, please check the terminal output for more information.");
-        }
-        return exitCode;
+    async down(socket: DockgeACSocket) : Promise<number> {
+        const adapter = Stack.getAdapter(this.server);
+        await adapter.down(this.name);
+        return 0;
     }
 
-    async down(socket: DockgeSocket) : Promise<number> {
-        const terminalName = getComposeTerminalName(socket.endpoint, this.name);
-        let exitCode = await Terminal.exec(this.server, socket, terminalName, "docker", this.getComposeOptions("down"), this.path);
-        if (exitCode !== 0) {
-            throw new Error("Failed to down, please check the terminal output for more information.");
-        }
-        return exitCode;
-    }
+    async update(socket: DockgeACSocket) {
+        const adapter = Stack.getAdapter(this.server);
+        const lock = Stack.getStackLock(this.server);
 
-    async update(socket: DockgeSocket) {
-        const terminalName = getComposeTerminalName(socket.endpoint, this.name);
-        let exitCode = await Terminal.exec(this.server, socket, terminalName, "docker", this.getComposeOptions("pull"), this.path);
-        if (exitCode !== 0) {
-            throw new Error("Failed to pull, please check the terminal output for more information.");
+        const env = dotenv.parse(this.composeENV ?? "");
+        const renderedComposeYAML = envsubstYAML(this.composeYAML ?? "", env);
+
+        for (const svc of Object.values((compile(renderedComposeYAML, this.name)).plan.services)) {
+            await adapter.pullImage(svc.image);
         }
 
-        // If the stack is not running, we don't need to restart it
         await this.updateStatus();
         log.debug("update", "Status: " + this.status);
         if (this.status !== RUNNING) {
-            return exitCode;
+            return 0;
         }
 
-        exitCode = await Terminal.exec(this.server, socket, terminalName, "docker", this.getComposeOptions("up", "-d", "--remove-orphans"), this.path);
-        if (exitCode !== 0) {
-            throw new Error("Failed to restart, please check the terminal output for more information.");
+        const { plan, errors } = compile(renderedComposeYAML, this.name);
+        if (errors.length > 0) {
+            throw new Error(`Preflight failed: ${errors.map(e => e.message).join(", ")}`);
         }
-        return exitCode;
+
+        await adapter.down(this.name);
+        await adapter.deploy(plan);
+
+        const lockData = lock.read(this.name);
+        if (lockData) {
+            lockData.fingerprint = lock.getFingerprint(this.composeYAML ?? "");
+            lock.write(this.name, lockData);
+        }
+
+        return 0;
     }
 
-    async joinCombinedTerminal(socket: DockgeSocket) {
+    async joinCombinedTerminal(socket: DockgeACSocket) {
         const terminalName = getCombinedTerminalName(socket.endpoint, this.name);
-        const terminal = Terminal.getOrCreateTerminal(this.server, terminalName, "docker", this.getComposeOptions("logs", "-f", "--tail", "100"), this.path);
+        const terminal = Terminal.getOrCreateTerminal(this.server, terminalName, "container", [ "logs", "--follow", "--tail", "100", `${CONTAINER_PREFIX}_${this.name}` ], this.path);
         terminal.enableKeepAlive = true;
         terminal.rows = COMBINED_TERMINAL_ROWS;
         terminal.cols = COMBINED_TERMINAL_COLS;
@@ -487,7 +503,7 @@ export class Stack {
         terminal.start();
     }
 
-    async leaveCombinedTerminal(socket: DockgeSocket) {
+    async leaveCombinedTerminal(socket: DockgeACSocket) {
         const terminalName = getCombinedTerminalName(socket.endpoint, this.name);
         const terminal = Terminal.getTerminal(terminalName);
         if (terminal) {
@@ -495,12 +511,13 @@ export class Stack {
         }
     }
 
-    async joinContainerTerminal(socket: DockgeSocket, serviceName: string, shell : string = "sh", index: number = 0) {
+    async joinContainerTerminal(socket: DockgeACSocket, serviceName: string, shell : string = "sh", index: number = 0) {
         const terminalName = getContainerExecTerminalName(socket.endpoint, this.name, serviceName, index);
         let terminal = Terminal.getTerminal(terminalName);
 
         if (!terminal) {
-            terminal = new InteractiveTerminal(this.server, terminalName, "docker", this.getComposeOptions("exec", serviceName, shell), this.path);
+            const cName = `${CONTAINER_PREFIX}_${this.name}_${serviceName}_1`;
+            terminal = new InteractiveTerminal(this.server, terminalName, "container", [ "exec", "-it", cName, shell ], this.path);
             terminal.rows = TERMINAL_ROWS;
             log.debug("joinContainerTerminal", "Terminal created");
         }
@@ -513,36 +530,14 @@ export class Stack {
         let statusList = new Map<string, { state: string, ports: string[] }>();
 
         try {
-            let res = await childProcessAsync.spawn("docker", this.getComposeOptions("ps", "--format", "json"), {
-                cwd: this.path,
-                encoding: "utf-8",
-            });
+            const adapter = Stack.getAdapter(this.server);
+            const adapterStatusMap = await adapter.getServiceStatusList(this.name);
 
-            if (!res.stdout) {
-                return statusList;
-            }
-
-            let lines = res.stdout?.toString().split("\n");
-
-            for (let line of lines) {
-                try {
-                    let obj = JSON.parse(line);
-                    let ports = (obj.Ports as string).split(/,\s*/).filter((s) => {
-                        return s.indexOf("->") >= 0;
-                    });
-                    if (obj.Health === "") {
-                        statusList.set(obj.Service, {
-                            state: obj.State,
-                            ports: ports
-                        });
-                    } else {
-                        statusList.set(obj.Service, {
-                            state: obj.Health,
-                            ports: ports
-                        });
-                    }
-                } catch (e) {
-                }
+            for (const [ svcName, status ] of adapterStatusMap) {
+                statusList.set(svcName, {
+                    state: status.state,
+                    ports: [],
+                });
             }
 
             return statusList;
@@ -550,6 +545,5 @@ export class Stack {
             log.error("getServiceStatusList", e);
             return statusList;
         }
-
     }
 }

@@ -1,12 +1,12 @@
 import { SocketHandler } from "../socket-handler.js";
-import { DockgeServer } from "../dockge-server";
+import { DockgeACServer } from "../dockge-server";
 import { log } from "../log";
-import { callbackError, callbackResult, checkLogin, DockgeSocket } from "../util-server";
+import { callbackError, callbackResult, checkLogin, DockgeACSocket } from "../util-server";
 import { LooseObject } from "../../common/util-common";
 
 export class ManageAgentSocketHandler extends SocketHandler {
 
-    create(socket : DockgeSocket, server : DockgeServer) {
+    create(socket : DockgeACSocket, server : DockgeACServer) {
         // addAgent
         socket.on("addAgent", async (requestData : unknown, callback : unknown) => {
             try {

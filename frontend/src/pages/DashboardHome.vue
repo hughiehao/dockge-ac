@@ -5,6 +5,12 @@
                 {{ $t("home") }}
             </h1>
 
+            <div class="mb-3">
+                <router-link to="/images" class="btn btn-outline-primary">
+                    <font-awesome-icon icon="images" /> Images
+                </router-link>
+            </div>
+
             <div class="row first-row">
                 <!-- Left -->
                 <div class="col-md-7">
@@ -26,13 +32,18 @@
                         </div>
                     </div>
 
-                    <!-- Docker Run -->
-                    <h2 class="mb-3">{{ $t("Docker Run") }}</h2>
-                    <div class="mb-3">
-                        <textarea id="name" v-model="dockerRunCommand" type="text" class="form-control docker-run shadow-box" required placeholder="docker run ..."></textarea>
+                    <!-- Docker Run (disabled in Apple Container mode) -->
+                    <div class="mb-4 p-3 text-muted">
+                        <i class="bi bi-info-circle"></i> Apple Container mode — docker run conversion not available
                     </div>
+                    <div v-if="false">
+                        <h2 class="mb-3">{{ $t("Docker Run") }}</h2>
+                        <div class="mb-3">
+                            <textarea id="name" v-model="dockerRunCommand" type="text" class="form-control docker-run shadow-box" required placeholder="docker run ..."></textarea>
+                        </div>
 
-                    <button class="btn-normal btn mb-4" @click="convertDockerRun">{{ $t("Convert to Compose") }}</button>
+                        <button class="btn-normal btn mb-4" @click="convertDockerRun">{{ $t("Convert to Compose") }}</button>
+                    </div>
                 </div>
                 <!-- Right -->
                 <div class="col-md-5">

@@ -21,7 +21,7 @@ import { R } from "redbean-node";
 import { genSecret, isDev, LooseObject } from "../common/util-common";
 import { generatePasswordHash } from "./password-hash";
 import { Bean } from "redbean-node/dist/bean";
-import { Arguments, Config, DockgeSocket } from "./util-server";
+import { Arguments, Config, DockgeACSocket } from "./util-server";
 import { DockerSocketHandler } from "./agent-socket-handlers/docker-socket-handler";
 import expressStaticGzip from "express-static-gzip";
 import path from "path";
@@ -30,15 +30,17 @@ import { Stack } from "./stack";
 import { Cron } from "croner";
 import gracefulShutdown from "http-graceful-shutdown";
 import User from "./models/user";
-import childProcessAsync from "promisify-child-process";
 import { AgentManager } from "./agent-manager";
 import { AgentProxySocketHandler } from "./socket-handlers/agent-proxy-socket-handler";
 import { AgentSocketHandler } from "./agent-socket-handler";
 import { AgentSocket } from "../common/agent-socket";
 import { ManageAgentSocketHandler } from "./socket-handlers/manage-agent-socket-handler";
 import { Terminal } from "./terminal";
+import { ContainerObserver } from "./runtime/apple-container/observer.js";
+import { isRuntimeAvailable } from "./runtime/apple-container/capabilities.js";
+import { AppleContainerAdapter } from "./runtime/apple-container/adapter.js";
 
-export class DockgeServer {
+export class DockgeACServer {
     app : Express;
     httpServer : http.Server;
     packageJSON : PackageJson;
@@ -80,6 +82,8 @@ export class DockgeServer {
 
     stacksDir : string = "";
 
+    containerObserver: ContainerObserver | null = null;
+
     /**
      *
      */
@@ -87,7 +91,7 @@ export class DockgeServer {
         // Catch unexpected errors here
         let unexpectedErrorHandler = (error : unknown) => {
             console.trace(error);
-            console.error("If you keep encountering errors, please report to https://github.com/louislam/dockge");
+            console.error("If you keep encountering errors, please report to your Dockge AC repository issue tracker.");
         };
         process.addListener("unhandledRejection", unexpectedErrorHandler);
         process.addListener("uncaughtException", unexpectedErrorHandler);
@@ -249,39 +253,39 @@ export class DockgeServer {
         });
 
         this.io.on("connection", async (socket: Socket) => {
-            let dockgeSocket = socket as DockgeSocket;
-            dockgeSocket.instanceManager = new AgentManager(dockgeSocket);
-            dockgeSocket.emitAgent = (event : string, ...args : unknown[]) => {
+            let dockgeACSocket = socket as DockgeACSocket;
+            dockgeACSocket.instanceManager = new AgentManager(dockgeACSocket);
+            dockgeACSocket.emitAgent = (event : string, ...args : unknown[]) => {
                 let obj = args[0];
                 if (typeof(obj) === "object") {
                     let obj2 = obj as LooseObject;
-                    obj2.endpoint = dockgeSocket.endpoint;
+                    obj2.endpoint = dockgeACSocket.endpoint;
                 }
-                dockgeSocket.emit("agent", event, ...args);
+                dockgeACSocket.emit("agent", event, ...args);
             };
 
             if (typeof(socket.request.headers.endpoint) === "string") {
-                dockgeSocket.endpoint = socket.request.headers.endpoint;
+                dockgeACSocket.endpoint = socket.request.headers.endpoint;
             } else {
-                dockgeSocket.endpoint = "";
+                dockgeACSocket.endpoint = "";
             }
 
-            if (dockgeSocket.endpoint) {
-                log.info("server", "Socket connected (agent), as endpoint " + dockgeSocket.endpoint);
+            if (dockgeACSocket.endpoint) {
+                log.info("server", "Socket connected (agent), as endpoint " + dockgeACSocket.endpoint);
             } else {
                 log.info("server", "Socket connected (direct)");
             }
 
-            this.sendInfo(dockgeSocket, true);
+            this.sendInfo(dockgeACSocket, true);
 
             if (this.needSetup) {
                 log.info("server", "Redirect to setup page");
-                dockgeSocket.emit("setup");
+                dockgeACSocket.emit("setup");
             }
 
             // Create socket handlers (original, no agent support)
             for (const socketHandler of this.socketHandlerList) {
-                socketHandler.create(dockgeSocket, this);
+                socketHandler.create(dockgeACSocket, this);
             }
 
             // Create Agent Socket
@@ -289,11 +293,11 @@ export class DockgeServer {
 
             // Create agent socket handlers
             for (const socketHandler of this.agentSocketHandlerList) {
-                socketHandler.create(dockgeSocket, this, agentSocket);
+                socketHandler.create(dockgeACSocket, this, agentSocket);
             }
 
             // Create agent proxy socket handlers
-            this.agentProxySocketHandler.create2(dockgeSocket, this, agentSocket);
+            this.agentProxySocketHandler.create2(dockgeACSocket, this, agentSocket);
 
             // ***************************
             // Better do anything after added all socket handlers here
@@ -302,16 +306,16 @@ export class DockgeServer {
             log.debug("auth", "check auto login");
             if (await Settings.get("disableAuth")) {
                 log.info("auth", "Disabled Auth: auto login to admin");
-                this.afterLogin(dockgeSocket, await R.findOne("user") as User);
-                dockgeSocket.emit("autoLogin");
+                this.afterLogin(dockgeACSocket, await R.findOne("user") as User);
+                dockgeACSocket.emit("autoLogin");
             } else {
                 log.debug("auth", "need auth");
             }
 
             // Socket disconnect
-            dockgeSocket.on("disconnect", () => {
+            dockgeACSocket.on("disconnect", () => {
                 log.info("server", "Socket disconnected!");
-                dockgeSocket.instanceManager.disconnectAll();
+                dockgeACSocket.instanceManager.disconnectAll();
             });
 
         });
@@ -327,7 +331,7 @@ export class DockgeServer {
         }
     }
 
-    async afterLogin(socket : DockgeSocket, user : User) {
+    async afterLogin(socket : DockgeACSocket, user : User) {
         socket.userID = user.id;
         socket.join(user.id.toString());
 
@@ -388,11 +392,26 @@ export class DockgeServer {
         }
 
         // Listen
-        this.httpServer.listen(this.config.port, this.config.hostname, () => {
+        this.httpServer.listen(this.config.port, this.config.hostname, async () => {
             if (this.config.hostname) {
                 log.info( "server", `Listening on ${this.config.hostname}:${this.config.port}`);
             } else {
                 log.info("server", `Listening on ${this.config.port}`);
+            }
+
+            // Start container observer
+            if (await isRuntimeAvailable()) {
+                this.containerObserver = new ContainerObserver(5000);
+                this.containerObserver.on("statusUpdate", () => {
+                    this.sendStackList();
+                });
+                this.containerObserver.on("pollError", (err: Error) => {
+                    log.warn("observer", `Poll error: ${err.message}`);
+                });
+                this.containerObserver.start();
+                log.info("server", "Container observer started");
+            } else {
+                log.warn("server", "Apple Container runtime not available — observer not started");
             }
 
             // Run every 10 seconds
@@ -431,12 +450,13 @@ export class DockgeServer {
         if (!hideVersion) {
             versionProperty = packageJSON.version;
             latestVersionProperty = checkVersion.latestVersion;
-            isContainer = (process.env.DOCKGE_IS_CONTAINER === "1");
+            isContainer = false;
         }
 
         socket.emit("info", {
             version: versionProperty,
             latestVersion: latestVersionProperty,
+            repoURL: process.env.DOCKGE_AC_REPO_URL || "https://github.com/louislam/dockge",
             isContainer,
             primaryHostname: await Settings.get("primaryHostname"),
             //serverTimezone: await this.getTimezone(),
@@ -591,10 +611,10 @@ export class DockgeServer {
         let stackList;
 
         for (let socket of socketList) {
-            let dockgeSocket = socket as DockgeSocket;
+            let dockgeACSocket = socket as DockgeACSocket;
 
             // Check if the room is a number (user id)
-            if (dockgeSocket.userID) {
+            if (dockgeACSocket.userID) {
 
                 // Get the list only if there is a logged in user
                 if (!stackList) {
@@ -604,11 +624,11 @@ export class DockgeServer {
                 let map : Map<string, object> = new Map();
 
                 for (let [ stackName, stack ] of stackList) {
-                    map.set(stackName, stack.toSimpleJSON(dockgeSocket.endpoint));
+                    map.set(stackName, stack.toSimpleJSON(dockgeACSocket.endpoint));
                 }
 
-                log.debug("server", "Send stack list to user: " + dockgeSocket.id + " (" + dockgeSocket.endpoint + ")");
-                dockgeSocket.emitAgent("stackList", {
+                log.debug("server", "Send stack list to user: " + dockgeACSocket.id + " (" + dockgeACSocket.endpoint + ")");
+                dockgeACSocket.emitAgent("stackList", {
                     ok: true,
                     stackList: Object.fromEntries(map),
                 });
@@ -617,24 +637,24 @@ export class DockgeServer {
     }
 
     async getDockerNetworkList() : Promise<string[]> {
-        let res = await childProcessAsync.spawn("docker", [ "network", "ls", "--format", "{{.Name}}" ], {
-            encoding: "utf-8",
-        });
-
-        if (!res.stdout) {
+        try {
+            const adapter = new AppleContainerAdapter(this.config.dataDir);
+            return await adapter.getNetworkList();
+        } catch (e) {
+            log.error("getDockerNetworkList", e);
             return [];
         }
+    }
 
-        let list = res.stdout.toString().split("\n");
-
-        // Remove empty string item
-        list = list.filter((item) => {
-            return item !== "";
-        }).sort((a, b) => {
-            return a.localeCompare(b);
-        });
-
-        return list;
+    async getContainerImageList() : Promise<object[]> {
+        try {
+            const adapter = new AppleContainerAdapter(this.config.dataDir);
+            const images = await adapter.getImageList();
+            return images as unknown as object[];
+        } catch (e) {
+            log.error("getContainerImageList", e);
+            return [];
+        }
     }
 
     get stackDirFullPath() {
@@ -649,6 +669,10 @@ export class DockgeServer {
     async shutdownFunction(signal : string | undefined) {
         log.info("server", "Shutdown requested");
         log.info("server", "Called signal: " + signal);
+
+        if (this.containerObserver) {
+            this.containerObserver.stop();
+        }
 
         // TODO: Close all terminals?
 
@@ -671,7 +695,7 @@ export class DockgeServer {
      */
     disconnectAllSocketClients(userID: number | undefined, currentSocketID? : string) {
         for (const rawSocket of this.io.sockets.sockets.values()) {
-            let socket = rawSocket as DockgeSocket;
+            let socket = rawSocket as DockgeACSocket;
             if ((!userID || socket.userID === userID) && socket.id !== currentSocketID) {
                 try {
                     socket.emit("refresh");

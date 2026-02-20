@@ -13,7 +13,7 @@ export interface JWTDecoded {
     h? : string;
 }
 
-export interface DockgeSocket extends Socket {
+export interface DockgeACSocket extends Socket {
     userID: number;
     consoleTerminal? : Terminal;
     instanceManager : AgentManager;
@@ -39,7 +39,7 @@ export interface Config extends Arguments {
     stacksDir : string;
 }
 
-export function checkLogin(socket : DockgeSocket) {
+export function checkLogin(socket : DockgeACSocket) {
     if (!socket.userID) {
         throw new Error("You are not logged in.");
     }
@@ -83,7 +83,7 @@ export function callbackResult(result : unknown, callback : unknown) {
     callback(result);
 }
 
-export async function doubleCheckPassword(socket : DockgeSocket, currentPassword : unknown) {
+export async function doubleCheckPassword(socket : DockgeACSocket, currentPassword : unknown) {
     if (typeof currentPassword !== "string") {
         throw new Error("Wrong data type?");
     }

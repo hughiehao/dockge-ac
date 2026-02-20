@@ -2,8 +2,9 @@
     <div class="container-fluid">
         <div class="row">
             <div v-if="!$root.isMobile" class="col-12 col-md-4 col-xl-3">
-                <div>
-                    <router-link to="/compose" class="btn btn-primary mb-3"><font-awesome-icon icon="plus" /> {{ $t("compose") }}</router-link>
+                <div class="mb-3 d-flex gap-2 flex-wrap">
+                    <router-link to="/compose" class="btn btn-primary"><font-awesome-icon icon="plus" /> {{ $t("compose") }}</router-link>
+                    <router-link to="/images" class="btn btn-outline-primary"><font-awesome-icon icon="images" /> Images</router-link>
                 </div>
                 <StackList :scrollbar="true" />
             </div>

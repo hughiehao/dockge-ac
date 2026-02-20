@@ -1,7 +1,7 @@
 // @ts-ignore
 import composerize from "composerize";
 import { SocketHandler } from "../socket-handler.js";
-import { DockgeServer } from "../dockge-server";
+import { DockgeACServer } from "../dockge-server";
 import { log } from "../log";
 import { R } from "redbean-node";
 import { loginRateLimiter, twoFaRateLimiter } from "../rate-limiter";
@@ -10,7 +10,7 @@ import { User } from "../models/user";
 import {
     callbackError,
     checkLogin,
-    DockgeSocket,
+    DockgeACSocket,
     doubleCheckPassword,
     JWTDecoded,
     ValidationError
@@ -22,7 +22,7 @@ import fs, { promises as fsAsync } from "fs";
 import path from "path";
 
 export class MainSocketHandler extends SocketHandler {
-    create(socket : DockgeSocket, server : DockgeServer) {
+    create(socket : DockgeACSocket, server : DockgeACServer) {
 
         // ***************************
         // Public Socket API
@@ -36,7 +36,7 @@ export class MainSocketHandler extends SocketHandler {
                 }
 
                 if ((await R.knex("user").count("id as count").first()).count !== 0) {
-                    throw new Error("Dockge has been initialized. If you want to run setup again, please delete the database.");
+                    throw new Error("Dockge AC has been initialized. If you want to run setup again, please delete the database.");
                 }
 
                 const user = R.dispense("user");

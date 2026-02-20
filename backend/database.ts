@@ -1,6 +1,6 @@
 import { log } from "./log";
 import { R } from "redbean-node";
-import { DockgeServer } from "./dockge-server";
+import { DockgeACServer } from "./dockge-server";
 import fs from "fs";
 import path from "path";
 import knex from "knex";
@@ -33,14 +33,14 @@ export class Database {
 
     static knexMigrationsPath = "./backend/migrations";
 
-    private static server : DockgeServer;
+    private static server : DockgeACServer;
 
     /**
      * Use for decode the auth object
      */
     jwtSecret? : string;
 
-    static async init(server : DockgeServer) {
+    static async init(server : DockgeACServer) {
         this.server = server;
 
         log.debug("server", "Connecting to the database");
@@ -189,7 +189,7 @@ export class Database {
                 // Allow missing patch files for downgrade or testing pr.
                 if (e.message.includes("the following files are missing:")) {
                     log.warn("db", e.message);
-                    log.warn("db", "Database migration failed, you may be downgrading Dockge.");
+                    log.warn("db", "Database migration failed, you may be downgrading Dockge AC.");
                 } else {
                     log.error("db", "Database migration failed");
                     throw e;

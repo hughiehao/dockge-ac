@@ -1,4 +1,4 @@
-import { DockgeSocket } from "./util-server";
+import { DockgeACSocket } from "./util-server";
 import { io, Socket as SocketClient } from "socket.io-client";
 import { log } from "./log";
 import { Agent } from "./models/agent";
@@ -13,12 +13,12 @@ import dayjs, { Dayjs } from "dayjs";
  */
 export class AgentManager {
 
-    protected socket : DockgeSocket;
+    protected socket : DockgeACSocket;
     protected agentSocketList : Record<string, SocketClient> = {};
     protected agentLoggedInList : Record<string, boolean> = {};
     protected _firstConnectTime : Dayjs = dayjs();
 
-    constructor(socket: DockgeSocket) {
+    constructor(socket: DockgeACSocket) {
         this.socket = socket;
     }
 
@@ -32,11 +32,11 @@ export class AgentManager {
             let endpoint = obj.host;
 
             if (!endpoint) {
-                reject(new Error("Invalid Dockge URL"));
+                reject(new Error("Invalid Dockge AC URL"));
             }
 
             if (this.agentSocketList[endpoint]) {
-                reject(new Error("The Dockge URL already exists"));
+                reject(new Error("The Dockge AC URL already exists"));
             }
 
             let client = io(url, {
@@ -62,7 +62,7 @@ export class AgentManager {
 
             client.on("connect_error", (err) => {
                 if (err.message === "xhr poll error") {
-                    reject(new Error("Unable to connect to the Dockge instance"));
+                    reject(new Error("Unable to connect to the Dockge AC instance"));
                 } else {
                     reject(err);
                 }

@@ -13,10 +13,10 @@
         <header v-if="! $root.isMobile" class="d-flex flex-wrap justify-content-center py-3 mb-3 border-bottom">
             <router-link to="/" class="d-flex align-items-center mb-3 mb-md-0 me-md-auto text-dark text-decoration-none">
                 <object class="bi me-2 ms-4" width="40" height="40" data="/icon.svg" />
-                <span class="fs-4 title">Dockge</span>
+                <span class="fs-4 title">Dockge AC</span>
             </router-link>
 
-            <a v-if="hasNewVersion" target="_blank" href="https://github.com/louislam/dockge/releases" class="btn btn-warning me-3">
+            <a v-if="hasNewVersion" target="_blank" :href="`${repoURL}/releases`" class="btn btn-warning me-3">
                 <font-awesome-icon icon="arrow-alt-circle-up" /> {{ $t("newUpdate") }}
             </a>
 
@@ -30,6 +30,12 @@
                 <li v-if="$root.loggedIn" class="nav-item me-2">
                     <router-link to="/console" class="nav-link">
                         <font-awesome-icon icon="terminal" /> {{ $t("console") }}
+                    </router-link>
+                </li>
+
+                <li v-if="$root.loggedIn" class="nav-item me-2">
+                    <router-link to="/images" class="nav-link">
+                        <font-awesome-icon icon="images" /> Images
                     </router-link>
                 </li>
 
@@ -128,6 +134,10 @@ export default {
             } else {
                 return false;
             }
+        },
+
+        repoURL() {
+            return this.$root.info.repoURL || "https://github.com/louislam/dockge";
         },
 
     },
