@@ -4,7 +4,7 @@
 
 # Dockge AC
 
-Dockge AC is an Apple Container focused stack manager with a reactive web UI.
+Dockge AC is an Apple Container focused stack manager with a reactive web UI. 
 
 ## Upstream Attribution
 
